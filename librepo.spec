@@ -10,14 +10,25 @@
 
 %if 0%{?fedora} >= 39
 %bcond_with use_gpgme
+%bcond_with use_selinux
 %else
 %bcond_without use_gpgme
+%bcond_without use_selinux
+%endif
+
+# Needs to match how gnupg2 is compiled
+%bcond_with run_gnupg_user_socket
+
+%if %{with use_gpgme} && %{with use_selinux}
+%global need_selinux 1
+%else
+%global need_selinux 0
 %endif
 
 %global dnf_conflict 2.8.8
 
 Name:           librepo
-Version:        1.16.0
+Version:        1.17.0
 Release:        1%{?dist}
 Summary:        Repodata downloading library
 
@@ -39,6 +50,9 @@ BuildRequires:  libattr-devel
 BuildRequires:  libcurl-devel >= %{libcurl_version}
 BuildRequires:  pkgconfig(libxml-2.0)
 BuildRequires:  pkgconfig(libcrypto)
+%if %{need_selinux}
+BuildRequires:  pkgconfig(libselinux)
+%endif
 BuildRequires:  pkgconfig(openssl)
 %if %{with zchunk}
 BuildRequires:  pkgconfig(zck) >= 0.9.11
@@ -78,7 +92,9 @@ Python 3 bindings for the librepo library.
 %build
 %cmake \
     -DWITH_ZCHUNK=%{?with_zchunk:ON}%{!?with_zchunk:OFF} \
-    -DUSE_GPGME=%{?with_use_gpgme:ON}%{!?with_use_gpgme:OFF}
+    -DUSE_GPGME=%{?with_use_gpgme:ON}%{!?with_use_gpgme:OFF} \
+    -DUSE_RUN_GNUPG_USER_SOCKET=%{?with_run_gnupg_user_socket:ON}%{!?with_run_gnupg_user_socket:OFF} \
+    -DENABLE_SELINUX=%{?need_selinux:ON}%{!?need_selinux:OFF}
 %cmake_build
 
 %check

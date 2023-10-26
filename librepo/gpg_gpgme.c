@@ -25,7 +25,13 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <gpgme.h>
+#include <stdint.h>
 #include <unistd.h>
+
+#if ENABLE_SELINUX
+#include <selinux/selinux.h>
+#include <selinux/label.h>
+#endif
 
 #include "gpg.h"
 #include "gpg_internal.h"
@@ -33,9 +39,9 @@
 #include "util.h"
 
 /*
- * Creates the '/run/user/$UID' directory if it doesn't exist. If this
+ * Creates the '/run/gnupg/user/$UID' directory if it doesn't exist. If this
  * directory exists, gpgagent will create its sockets under
- * '/run/user/$UID/gnupg'.
+ * '/run/gnupg/user/$UID/gnupg'.
  *
  * If this directory doesn't exist, gpgagent will create its sockets in gpg
  * home directory, which is under '/var/cache/yum/metadata/' and this was
@@ -44,6 +50,15 @@
  * Previous solution was to send the agent a "KILLAGENT" message, but that
  * would cause a race condition with calling gpgme_release(), see [2], [3].
  *
+ * Current solution with precreating /run/user/$UID showed problematic when
+ * this library was used out of an systemd-logind session. Then
+ * /run/user/$UID, normally maintained by systemd, was assigned a SELinux
+ * label unexpected by systemd causing errors on a user logout [4].
+ *
+ * We remedy it by choosing the label according to a default file context
+ * policy (ENABLE_SELINUX macro) or by using a different path supported by
+ * some GnuPG configurations (DUSE_RUN_GNUPG_USER_SOCKET macro).
+ *
  * Since the agent doesn't clean up its sockets properly, by creating this
  * directory we make sure they are in a place that is not causing trouble with
  * container images.
@@ -51,16 +66,84 @@
  * [1] https://bugzilla.redhat.com/show_bug.cgi?id=1650266
  * [2] https://bugzilla.redhat.com/show_bug.cgi?id=1769831
  * [3] https://github.com/rpm-software-management/microdnf/issues/50
+ * [4] https://issues.redhat.com/browse/RHEL-6421
  */
 static void
 lr_gpg_ensure_socket_dir_exists()
 {
+#ifdef DUSE_RUN_GNUPG_USER_SOCKET
+    const char *templates[] = { "/run/gnupg", "/run/gnupg/user", "/run/gnupg/user/%ju", NULL };
+    const mode_t modes[] = { 0755, 0755, 0700, 0 };
+#else
+    const char *templates[] = { "/run/user/%ju", NULL };
+    const mode_t modes[] = { 0700, 0 };
+#endif
+    const uid_t uid = getuid();
     char dirname[32];
-    snprintf(dirname, sizeof(dirname), "/run/user/%u", getuid());
-    int res = mkdir(dirname, 0700);
-    if (res != 0 && errno != EEXIST) {
-        g_debug("Failed to create \"%s\": %d - %s\n", dirname, errno, strerror(errno));
+    int res;
+#if ENABLE_SELINUX
+    char *old_default_context = NULL;
+    int old_default_context_was_retrieved = 0;
+    struct selabel_handle *labeling_handle = NULL;
+
+    /* A purpose of this piece of code is to deal with applications whose
+     * security policy overrides a file context for temporary files but don't
+     * know that librepo executes GnuPG which expects a default file context. */
+    if (0 == getfscreatecon(&old_default_context)) {
+        old_default_context_was_retrieved = 1;
+    } else {
+        g_debug("Failed to retrieve a default SELinux context");
     }
+    labeling_handle = selabel_open(SELABEL_CTX_FILE, NULL, 0);
+    if (labeling_handle == NULL) {
+        g_debug("Failed to open a SELinux labeling handle: %s", strerror(errno));
+    }
+#endif
+
+    for (int i = 0; templates[i] != NULL; i++) {
+        res = snprintf(dirname, sizeof(dirname), templates[i], (uintmax_t)uid);
+        if (res >= sizeof(dirname)) {
+            g_debug("Failed to format a GnuPG agent socket path because of a small buffer");
+            goto exit;
+        }
+
+#if ENABLE_SELINUX
+        if (labeling_handle != NULL) {
+            char *new_default_context = NULL;
+            if (selabel_lookup(labeling_handle, &new_default_context, dirname, modes[i])) {
+                /* Here we could hard-code "system_u:object_r:user_tmp_t:s0", but
+                 * that value should be really defined in default file context
+                 * SELinux policy. Only log that the policy is incomplete. */
+                g_debug("Failed to look up a default SELinux label for \"%s\"", dirname);
+            } else {
+                if (setfscreatecon(new_default_context)) {
+                    g_debug("Failed to set default SELinux context to \"%s\"",
+                            new_default_context);
+                }
+                freecon(new_default_context);
+            }
+        }
+#endif
+
+        res = mkdir(dirname, modes[i]);
+        if (res != 0 && errno != EEXIST) {
+            g_debug("Failed to create \"%s\": %d - %s\n", dirname, errno, strerror(errno));
+            goto exit;
+        }
+    }
+
+exit:
+#if ENABLE_SELINUX
+    if (labeling_handle != NULL) {
+        selabel_close(labeling_handle);
+    }
+    if (old_default_context_was_retrieved) {
+        if (setfscreatecon(old_default_context)) {
+            g_debug("Failed to restore a default SELinux context");
+        }
+    }
+    freecon(old_default_context);
+#endif
 }
 
 static gpgme_ctx_t

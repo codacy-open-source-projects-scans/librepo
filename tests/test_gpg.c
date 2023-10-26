@@ -26,9 +26,9 @@ START_TEST(test_gpg_check_signature)
 
     tmp_home_path = lr_gettmpdir();
     key_path = lr_pathconcat(test_globals.testdata_dir,
-                             "repo_yum_01/repodata/repomd.xml.key", NULL);
+                             "repo_yum_01/repodata/repomd.xml.key.asc", NULL);
     _key_path = lr_pathconcat(test_globals.testdata_dir,
-                             "repo_yum_01/repodata/repomd.xml_bad.key", NULL);
+                             "repo_yum_01/repodata/repomd.xml_bad.key.asc", NULL);
     data_path = lr_pathconcat(test_globals.testdata_dir,
                              "repo_yum_01/repodata/repomd.xml", NULL);
     _data_path = lr_pathconcat(test_globals.testdata_dir,
@@ -36,7 +36,7 @@ START_TEST(test_gpg_check_signature)
     signature_path = lr_pathconcat(test_globals.testdata_dir,
                              "repo_yum_01/repodata/repomd.xml.asc", NULL);
     _signature_path = lr_pathconcat(test_globals.testdata_dir,
-                             "repo_yum_01/repodata/repomd.xml_bad.asc", NULL);
+                             "repo_yum_01/repodata/repomd.xml_bad.sig", NULL);
 
     // Import the first key directly from the file
     ret = lr_gpg_import_key(key_path, tmp_home_path, &tmp_err);
@@ -48,8 +48,10 @@ START_TEST(test_gpg_check_signature)
                                  data_path,
                                  tmp_home_path,
                                  &tmp_err);
-    ck_assert(ret);
-    ck_assert_ptr_null(tmp_err);
+    ck_assert_msg(ret, "Checking valid key and data from file failed with \"%s\"",
+            (tmp_err && tmp_err->message) ? tmp_err->message : "");
+    ck_assert_msg(NULL == tmp_err, "Checking valid key and data from file passed but set error \"%s\"",
+            (tmp_err && tmp_err->message) ? tmp_err->message : "");
 
     // Bad signature signed with unknown key
     ret = lr_gpg_check_signature(_signature_path,
@@ -86,8 +88,10 @@ START_TEST(test_gpg_check_signature)
                                  _data_path,
                                  tmp_home_path,
                                  &tmp_err);
-    ck_assert(ret);
-    ck_assert_ptr_null(tmp_err);
+    ck_assert_msg(ret, "Checking valid key and data from memory failed with \"%s\"",
+            (tmp_err && tmp_err->message) ? tmp_err->message : "");
+    ck_assert_msg(NULL == tmp_err, "Checking valid key and data from memory passed but set error \"%s\"",
+            (tmp_err && tmp_err->message) ? tmp_err->message : "");
 
     // Bad signature signed with known key
     ret = lr_gpg_check_signature(_signature_path,
@@ -120,16 +124,14 @@ START_TEST(test_gpg_check_signature)
 }
 END_TEST
 
-START_TEST(test_gpg_check_key_export)
+
+static void check_key_import_test_export(const char *key_path)
 {
     gboolean ret;
-    char *key_path;
     char *tmp_home_path;
     GError *tmp_err = NULL;
 
     tmp_home_path = lr_gettmpdir();
-    key_path = lr_pathconcat(test_globals.testdata_dir,
-                             "repo_yum_01/repodata/repomd.xml.key", NULL);
 
     // Import the key from file descriptor
     int key_fd = open(key_path, O_RDONLY);
@@ -223,8 +225,23 @@ START_TEST(test_gpg_check_key_export)
 
     lr_gpg_keys_free(keys);
     lr_remove_dir(tmp_home_path);
-    lr_free(key_path);
     g_free(tmp_home_path);
+}
+
+
+START_TEST(test_gpg_check_armored_key_import_test_export)
+{
+    char *key_path = lr_pathconcat(test_globals.testdata_dir, "repo_yum_01/repodata/repomd.xml.key.asc", NULL);
+    check_key_import_test_export(key_path);
+    lr_free(key_path);
+}
+END_TEST
+
+START_TEST(test_gpg_check_binary_key_import_test_export)
+{
+    char *key_path = lr_pathconcat(test_globals.testdata_dir, "repo_yum_01/repodata/repomd.xml.key", NULL);
+    check_key_import_test_export(key_path);
+    lr_free(key_path);
 }
 END_TEST
 
@@ -235,7 +252,8 @@ gpg_suite(void)
     Suite *s = suite_create("gpg");
     TCase *tc = tcase_create("Main");
     tcase_add_test(tc, test_gpg_check_signature);
-    tcase_add_test(tc, test_gpg_check_key_export);
+    tcase_add_test(tc, test_gpg_check_armored_key_import_test_export);
+    tcase_add_test(tc, test_gpg_check_binary_key_import_test_export);
     suite_add_tcase(s, tc);
     return s;
 }
