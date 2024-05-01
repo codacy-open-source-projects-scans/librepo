@@ -229,19 +229,18 @@ lr_checksum_fd_compare(LrChecksumType type,
 
     _cleanup_free_ gchar *timestamp_str = g_strdup_printf("%lli", timestamp);
     const char *type_str = lr_checksum_type_to_str(type);
-    _cleanup_free_ gchar *timestamp_key = g_strconcat(XATTR_CHKSUM_PREFIX, "mtime", NULL);
     _cleanup_free_ gchar *checksum_key = g_strconcat(XATTR_CHKSUM_PREFIX, type_str, NULL);
 
     if (caching && timestamp != -1) {
         // Load cached checksum if enabled and used
         char buf[256];
         ssize_t attr_size;
-        attr_size = FGETXATTR(fd, timestamp_key, &buf, sizeof(buf)-1);
+        attr_size = FGETXATTR(fd, XATTR_CHKSUM_MTIME, &buf, sizeof(buf)-1);
         if (attr_size != -1) {
             buf[attr_size] = 0;
             // check that mtime stored in xattr is the same as timestamp
             if (strcmp(timestamp_str, buf) == 0) {
-                g_debug("%s: Using mtime cached in xattr: [%s] %s", __func__, timestamp_key, buf);
+                g_debug("%s: Using mtime cached in xattr: [%s] %s", __func__, XATTR_CHKSUM_MTIME, buf);
                 attr_size = FGETXATTR(fd, checksum_key, &buf, sizeof(buf)-1);
                 if (attr_size != -1) {
                     buf[attr_size] = 0;
@@ -257,6 +256,10 @@ lr_checksum_fd_compare(LrChecksumType type,
                 // timestamp stored in xattr is different => checksums are no longer valid
                 lr_checksum_clear_cache(fd);
             }
+        } else if (errno == ENOTSUP) {
+            // Extended attributes are not supported by the filesystem, or are disabled.
+            // Disable the use of extended attributes for cache.
+            caching = FALSE;
         }
     }
 
@@ -279,7 +282,7 @@ lr_checksum_fd_compare(LrChecksumType type,
 
     if (caching && *matches && timestamp != -1) {
         // Store timestamp and checksum as extended file attribute if caching is enabled
-        FSETXATTR(fd, timestamp_key, timestamp_str, strlen(timestamp_str), 0);
+        FSETXATTR(fd, XATTR_CHKSUM_MTIME, timestamp_str, strlen(timestamp_str), 0);
         FSETXATTR(fd, checksum_key, checksum, strlen(checksum), 0);
     }
 
@@ -294,22 +297,28 @@ lr_checksum_fd_compare(LrChecksumType type,
 void
 lr_checksum_clear_cache(int fd)
 {
-    char *xattrs = NULL;
-    ssize_t xattrs_len;
-    ssize_t bytes_read;
-    const char *attr;
-    ssize_t prefix_len = strlen(XATTR_CHKSUM_PREFIX);
+    // Remove the extended attribute containing mtime.
+    if (FREMOVEXATTR(fd, XATTR_CHKSUM_MTIME) == -1) {
+        if (errno == ENOTSUP) {
+            // Extended attributes are not supported by the filesystem, or are disabled.
+            return;
+        }
+    }
 
-    xattrs_len = FLISTXATTR(fd, NULL, 0);
+    // Remove the other extended attributes used by librepo to store the file checksum.
+    // Librepo does not need this to work properly. Deleting the mtime attribute is sufficient.
+    // We're just cleaning up.
+    ssize_t xattrs_len = FLISTXATTR(fd, NULL, 0);
     if (xattrs_len <= 0) {
         return;
     }
-    xattrs = lr_malloc(xattrs_len);
-    bytes_read = FLISTXATTR(fd, xattrs, xattrs_len);
+    char *xattrs = lr_malloc(xattrs_len);
+    ssize_t bytes_read = FLISTXATTR(fd, xattrs, xattrs_len);
     if (bytes_read < 0) {
         goto cleanup;
     }
-    attr = xattrs;
+    ssize_t prefix_len = strlen(XATTR_CHKSUM_PREFIX);
+    const char *attr = xattrs;
     while (attr < xattrs + xattrs_len) {
         if (strncmp(XATTR_CHKSUM_PREFIX, attr, prefix_len) == 0) {
             FREMOVEXATTR(fd, attr);
