@@ -390,6 +390,9 @@ lr_gpg_import_key_from_fd(int key_fd, const char *home_dir, GError **err)
 {
     g_autofree gchar * buf = NULL;
     const ssize_t size = read_file_fd_to_memory(key_fd, &buf, err);
+    if (size == -1 ) {
+        return FALSE;
+    }
     return lr_gpg_import_key_from_memory((const char *)buf, size, home_dir, err);
 }
 
@@ -398,6 +401,9 @@ lr_gpg_import_key(const char *key_fn, const char *home_dir, GError **err)
 {
     g_autofree gchar * buf = NULL;
     const ssize_t size = read_file_to_memory(key_fn, &buf, err);
+    if (size == -1 ) {
+        return FALSE;
+    }
     return lr_gpg_import_key_from_memory((const char *)buf, size, home_dir, err);
 }
 
@@ -532,9 +538,8 @@ check_signature(const gchar * sig_buf, ssize_t sig_buf_len, const gchar * data, 
             memcpy(sig_buf_with_null_byte, sig_buf, sig_buf_len);
             sig_buf_with_null_byte[sig_buf_len] = '\0';
 
-            // set block_begin and key to null byte terminated local copy
+            // set block_begin to null byte terminated local copy
             block_begin = sig_buf_with_null_byte + (block_begin - sig_buf);
-            sig_buf = sig_buf_with_null_byte;
         }
 
         pgpArmor ret_pgparmor = pgpParsePkts((const char *)block_begin, &pkts, &pkts_len);

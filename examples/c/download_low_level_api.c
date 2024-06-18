@@ -23,14 +23,11 @@ main(void)
     GError *tmp_err = NULL;
 
     // Setup logging (optional step)
-
-/*
     g_log_set_handler("librepo", G_LOG_LEVEL_ERROR |
                                  G_LOG_LEVEL_CRITICAL |
                                  G_LOG_LEVEL_DEBUG |
                                  G_LOG_LEVEL_WARNING,
                       log_handler_cb, NULL);
-*/
 
     // Download something
     GSList *possible_checksums = NULL;
@@ -57,7 +54,10 @@ main(void)
                 NULL,   // Mirror failure callback
                 NULL,   // User's data for the end and mirror failure callbacks
                 0,      // Start of byterange
-                3788       // End of byterange
+                3788,   // End of byterange
+                NULL,   // Range string to download; Overrides Start and End of byterange
+                FALSE,  // TRUE = Tell proxy server that we don't want to use cache for this request
+                FALSE   // TRUE = This target is a zchunk file; FALSE = is not zchuk file
             );
 
     ret = lr_download_target(target, &tmp_err);
