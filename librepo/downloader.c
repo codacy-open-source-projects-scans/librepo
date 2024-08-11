@@ -1139,6 +1139,8 @@ prep_zck_header(LrTarget *target, GError **err)
         zck = lr_zck_init_read(target->target, target->target->path,
                                fd, &tmp_err);
         if(zck) {
+            zckCtx *old_zck = zck_dl_get_zck(target->target->zck_dl);
+            zck_free(&old_zck);
             if(!zck_dl_set_zck(target->target->zck_dl, zck)) {
                 g_set_error(err, LR_DOWNLOADER_ERROR, LRE_ZCK,
                             "Unable to setup zchunk download context");
@@ -1228,6 +1230,7 @@ find_local_zck_chunks(LrTarget *target, GError **err)
 
             zckCtx *zck_src = zck_create();
             if(!zck_init_read(zck_src, chk_fd)) {
+                zck_free(&zck_src);
                 close(chk_fd);
                 continue;
             }
@@ -1354,8 +1357,6 @@ check_zck(LrTarget *target, GError **err)
 
         if(cks_good == 1) {  // All checksums good
             g_debug("%s: File is complete", __func__);
-            if(target->target->zck_dl)
-                zck_dl_free(&(target->target->zck_dl));
             target->zck_state = LR_ZCK_DL_FINISHED;
             return TRUE;
         }
@@ -1375,8 +1376,6 @@ check_zck(LrTarget *target, GError **err)
         }
 
         if(cks_good == 1) {  // All checksums good
-            if(target->target->zck_dl)
-                zck_dl_free(&(target->target->zck_dl));
             target->zck_state = LR_ZCK_DL_FINISHED;
             return TRUE;
         }
