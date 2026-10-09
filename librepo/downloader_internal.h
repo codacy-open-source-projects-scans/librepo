@@ -14,8 +14,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+ * License along with this library; if not, see <https://www.gnu.org/licenses/>.
  */
 
 #ifndef LIBREPO_DOWNLOADER_INTERNAL_H
@@ -62,6 +61,24 @@ lr_multi_mf_func(void *ptr, const char *msg, const char *url);
 
 int
 lr_metadata_target_end_func(void *ptr, LrTransferStatus status, const char *msg);
+
+/** Same as lr_download(), but additionally lets the caller opt out of
+ * persisting verified checksums to xattrs (and the
+ * fsync() that protects that write) for downloads that will never be
+ * re-verified from disk - e.g. packages downloaded with keepcache=0.
+ * lr_download() itself is a thin wrapper that always passes TRUE.
+ * @param targets                  See ::lr_download
+ * @param failfast                 See ::lr_download
+ * @param persist_checksum_cache   FALSE to skip persisting the checksum
+ *                                 cache (checksums are still verified).
+ * @param err                      See ::lr_download
+ * @return                         See ::lr_download
+ */
+gboolean
+lr_download_internal(GSList *targets,
+                     gboolean failfast,
+                     gboolean persist_checksum_cache,
+                     GError **err);
 
 G_END_DECLS
 

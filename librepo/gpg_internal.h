@@ -14,14 +14,16 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+ * License along with this library; if not, see <https://www.gnu.org/licenses/>.
  */
 
 #ifndef __LR_GPG_INTERNAL_H__
 #define __LR_GPG_INTERNAL_H__
 
 #include <glib.h>
+
+#define LR_GPG_ERR_SIGNING_KEY_NOT_FOUND  "Signing key not found"
+#define LR_GPG_ERR_BAD_SIGNATURE          "Bad PGP signature"
 
 struct tLrGpgSubkey {
     gboolean has_next;   // FALSE if this is the last subkey in the list

@@ -14,8 +14,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+ * License along with this library; if not, see <https://www.gnu.org/licenses/>.
  */
 
 #include <Python.h>
@@ -975,6 +974,7 @@ py_getinfo(_HandleObject *self, PyObject *args)
             PyTuple_SetItem(tuple, 1, obj);
 
             PyList_Append(list, tuple);
+            Py_DECREF(tuple);  // PyList_Append() doesn't steal the reference
         }
         return list;
     }
@@ -1003,7 +1003,9 @@ py_getinfo(_HandleObject *self, PyObject *args)
         }
         list = PyList_New(0);
         for (int x=0; strlist[x] != NULL; x++) {
-            PyList_Append(list, PyStringOrNone_FromString(strlist[x]));
+            PyObject *item = PyStringOrNone_FromString(strlist[x]);
+            PyList_Append(list, item);
+            Py_XDECREF(item);  // PyList_Append() doesn't steal the reference
         }
 
         g_strfreev(strlist);

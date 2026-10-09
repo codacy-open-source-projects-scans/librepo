@@ -14,8 +14,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+ * License along with this library; if not, see <https://www.gnu.org/licenses/>.
  */
 
 #include <assert.h>
@@ -283,8 +282,8 @@ lr_start_handler(void *pdata, const xmlChar *xmlElement, const xmlChar **xmlAttr
         assert(!pd->repomdrecord);
 
         val = lr_find_attr("cpeid", attr);
-        if (val)
-            pd->cpeid = g_strdup(val);
+        g_free(pd->cpeid);
+        pd->cpeid = g_strdup(val);
         break;
 
     case STATE_DATA:
@@ -362,7 +361,7 @@ lr_start_handler(void *pdata, const xmlChar *xmlElement, const xmlChar **xmlAttr
         val = lr_find_attr("type", attr);
         if (!val) {
             lr_xml_parser_warning(pd, LR_XML_WARNING_MISSINGATTR,
-                    "Missing attribute \"type\" of an open checksum element");
+                    "Missing attribute \"type\" of a header checksum element");
             break;
         }
 

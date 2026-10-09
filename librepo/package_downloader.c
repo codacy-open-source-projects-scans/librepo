@@ -14,8 +14,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+ * License along with this library; if not, see <https://www.gnu.org/licenses/>.
  */
 
 #define _GNU_SOURCE  // for GNU basename() implementation from string.h
@@ -35,6 +34,7 @@
 #include "package_downloader.h"
 #include "handle_internal.h"
 #include "downloader.h"
+#include "downloader_internal.h"
 #include "fastestmirror_internal.h"
 
 /* Do NOT use resume on successfully downloaded files - download will fail */
@@ -183,6 +183,7 @@ lr_download_packages(GSList *targets,
 {
     gboolean ret;
     gboolean failfast = flags & LR_PACKAGEDOWNLOAD_FAILFAST;
+    gboolean persist_checksum_cache = !(flags & LR_PACKAGEDOWNLOAD_TRANSIENT);
     struct sigaction old_sigact;
     GSList *downloadtargets = NULL;
     gboolean interruptible = FALSE;
@@ -287,7 +288,8 @@ lr_download_packages(GSList *targets,
                 g_set_error(err, LR_PACKAGE_DOWNLOADER_ERROR, LRE_IO,
                         "Cannot stat %s: %s", packagetarget->local_path,
                         g_strerror(errno));
-                return FALSE;
+                ret = FALSE;
+                goto cleanup;
             }
 
             realsize = buf.st_size;
@@ -417,16 +419,18 @@ lr_download_packages(GSList *targets,
         fmr_handles = g_slist_reverse(fmr_handles);
         ret = lr_fastestmirror_sort_internalmirrorlists(fmr_handles, err);
         g_slist_free(fmr_handles);
+        fmr_handles = NULL;
 
-        if (!ret) {
-            return FALSE;
-        }
+        if (!ret)
+            goto cleanup;
     }
 
     // Start downloading
-    ret = lr_download(downloadtargets, failfast, err);
+    ret = lr_download_internal(downloadtargets, failfast, persist_checksum_cache, err);
 
 cleanup:
+
+    g_slist_free(fmr_handles);
 
     // Copy download statuses from downloadtargets to targets
     for (GSList *elem = downloadtargets; elem; elem = g_slist_next(elem)) {
@@ -516,7 +520,7 @@ lr_check_packages(GSList *targets,
     for (GSList *elem = targets; elem; elem = g_slist_next(elem)) {
         LrPackageTarget *packagetarget = elem->data;
 
-        if (packagetarget->handle->interruptible)
+        if (packagetarget->handle && packagetarget->handle->interruptible)
             interruptible = TRUE;
 
         if (!packagetarget->checksum
@@ -534,6 +538,8 @@ lr_check_packages(GSList *targets,
     if (interruptible) {
         g_debug("%s: Using own SIGINT handler", __func__);
         struct sigaction sigact;
+        memset(&sigact, 0, sizeof(sigact));
+        sigemptyset(&sigact.sa_mask);
         sigact.sa_handler = lr_sigint_handler;
         sigaddset(&sigact.sa_mask, SIGINT);
         sigact.sa_flags = SA_RESTART;

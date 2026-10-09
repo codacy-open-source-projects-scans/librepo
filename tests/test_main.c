@@ -20,6 +20,7 @@
 #include "test_package_downloader.h"
 #include "test_repoconf.h"
 #include "test_repomd.h"
+#include "test_repo_zck.h"
 #include "test_url_substitution.h"
 #include "test_util.h"
 #include "test_version.h"
@@ -107,6 +108,7 @@ main(int argc, char **argv)
     if (downloading) {
         srunner_add_suite(sr, downloader_suite());
     }
+    srunner_add_suite(sr, downloader_local_suite());
     srunner_add_suite(sr, gpg_suite());
     srunner_add_suite(sr, handle_suite());
     srunner_add_suite(sr, lrmirrorlist_suite());
@@ -115,6 +117,7 @@ main(int argc, char **argv)
     srunner_add_suite(sr, package_downloader_suite());
     srunner_add_suite(sr, repoconf_suite());
     srunner_add_suite(sr, repomd_suite());
+    srunner_add_suite(sr, repo_zck_suite());
     srunner_add_suite(sr, url_substitution_suite());
     srunner_add_suite(sr, util_suite());
     srunner_add_suite(sr, version_suite());

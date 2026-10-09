@@ -14,8 +14,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+ * License along with this library; if not, see <https://www.gnu.org/licenses/>.
  */
 
 #define _GNU_SOURCE
@@ -181,7 +180,7 @@ handle_failure(LrMetadataTarget *target,
                GSList **paths,
                GError *err)
 {
-    lr_metadatatarget_append_error(target, err->message);
+    lr_metadatatarget_append_error(target, "%s", err->message);
     fillInvalidationValues(fd_list, paths);
     g_error_free(err);
 }
@@ -340,17 +339,17 @@ process_repomd_xml(GSList *targets,
         handle->gnupghomedir = g_strdup(target->gnupghomedir);
 
         if (target->download_target->rcode != LRE_OK) {
-            lr_metadatatarget_append_error(target, (char *) lr_strerror(target->download_target->rcode));
+            lr_metadatatarget_append_error(target, "%s", lr_strerror(target->download_target->rcode));
             goto fail;
         }
 
         if (!lr_check_repomd_xml_asc_availability(handle, target->repo, fd_value, path->data, &error)) {
-            lr_metadatatarget_append_error(target, error->message);
+            lr_metadatatarget_append_error(target, "%s", error->message);
             g_clear_error(&error);
             goto fail;
         }
 
-        lseek(fd_value, SEEK_SET, 0);
+        lseek(fd_value, 0, SEEK_SET);
         ret = lr_yum_repomd_parse_file(target->repomd, fd_value, lr_xml_parser_warning_logger,
                                        "Repomd xml parser", &error);
         if (!ret) {
@@ -382,7 +381,7 @@ lr_metadata_download_cleanup(GSList *download_targets)
         LrDownloadTarget *download_target = elem->data;
         LrMetadataTarget *target = download_target->userdata;
         if (download_target->err)
-            lr_metadatatarget_append_error(target, download_target->err);
+            lr_metadatatarget_append_error(target, "%s", download_target->err);
 
         if (target->err != NULL) {
             ret = FALSE;
@@ -636,5 +635,3 @@ lr_download_metadata(GSList *targets,
     restore_handle_callbacks(targets, handle_callbacks_backups);
     return cleanup(download_targets, err);
 }
-
-

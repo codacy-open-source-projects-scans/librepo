@@ -14,8 +14,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+ * License along with this library; if not, see <https://www.gnu.org/licenses/>.
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -54,7 +53,7 @@ lr_checksum_type(const char *type)
         return LR_CHECKSUM_UNKNOWN;
 
     for (size_t x = 0; x <= len; x++)
-        type_lower[x] = tolower(type[x]);
+        type_lower[x] = tolower((unsigned char) type[x]);
 
     if (!strncmp(type_lower, "md", 2)) {
         // MD* family
@@ -151,6 +150,7 @@ lr_checksum_fd(LrChecksumType type, int fd, GError **err)
         g_set_error(err, LR_CHECKSUM_ERROR, LRE_IO,
                     "Cannot seek to the begin of the file. "
                     "lseek(%d, 0, SEEK_SET) error: %s", fd, g_strerror(errno));
+        EVP_MD_CTX_destroy(ctx);
         return NULL;
     }
 
@@ -158,6 +158,7 @@ lr_checksum_fd(LrChecksumType type, int fd, GError **err)
         if (!EVP_DigestUpdate(ctx, buf, readed)) {
             g_set_error(err, LR_CHECKSUM_ERROR, LRE_OPENSSL,
                         "EVP_DigestUpdate() failed");
+            EVP_MD_CTX_destroy(ctx);
             return NULL;
         }
 
@@ -171,6 +172,7 @@ lr_checksum_fd(LrChecksumType type, int fd, GError **err)
     if (!EVP_DigestFinal_ex(ctx, raw_checksum, &len)) {
         g_set_error(err, LR_CHECKSUM_ERROR, LRE_OPENSSL,
                     "EVP_DigestFinal_ex() failed");
+        EVP_MD_CTX_destroy(ctx);
         return NULL;
     }
 
@@ -269,18 +271,21 @@ lr_checksum_fd_compare(LrChecksumType type,
 
     *matches = (strcmp(expected, checksum)) ? FALSE : TRUE;
 
-    if (fsync(fd) != 0) {
-        if (errno == EROFS || errno == EINVAL) {
-            g_debug("fsync failed: %s", strerror(errno));
-        } else {
-            g_set_error(err, LR_CHECKSUM_ERROR, LRE_FILE,
-                        "fsync failed: %s", strerror(errno));
-            lr_free(checksum);
-            return FALSE;
-        }
-    }
-
     if (caching && *matches && timestamp != -1) {
+        // fsync() only protects the xattr write below (data must hit
+        // storage before the metadata that vouches for it), so it is
+        // pointless when we're not about to write that xattr.
+        if (fsync(fd) != 0) {
+            if (errno == EROFS || errno == EINVAL) {
+                g_debug("fsync failed: %s", strerror(errno));
+            } else {
+                g_set_error(err, LR_CHECKSUM_ERROR, LRE_FILE,
+                            "fsync failed: %s", strerror(errno));
+                lr_free(checksum);
+                return FALSE;
+            }
+        }
+
         // Store timestamp and checksum as extended file attribute if caching is enabled
         FSETXATTR(fd, XATTR_CHKSUM_MTIME, timestamp_str, strlen(timestamp_str), 0);
         FSETXATTR(fd, checksum_key, checksum, strlen(checksum), 0);
@@ -319,7 +324,9 @@ lr_checksum_clear_cache(int fd)
     }
     ssize_t prefix_len = strlen(XATTR_CHKSUM_PREFIX);
     const char *attr = xattrs;
-    while (attr < xattrs + xattrs_len) {
+    // The list could have shrunk since its size was queried, only walk
+    // through the part that was actually filled in.
+    while (attr < xattrs + bytes_read) {
         if (strncmp(XATTR_CHKSUM_PREFIX, attr, prefix_len) == 0) {
             FREMOVEXATTR(fd, attr);
         }

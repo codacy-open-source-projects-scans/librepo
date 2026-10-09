@@ -14,8 +14,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+ * License along with this library; if not, see <https://www.gnu.org/licenses/>.
  */
 
 #include <Python.h>
@@ -37,12 +36,13 @@ py_download_packages(G_GNUC_UNUSED PyObject *self, PyObject *args)
     gboolean ret;
     PyObject *py_list;
     int failfast;
+    int transient = 0;  // optional (benchmarking-only): LR_PACKAGEDOWNLOAD_TRANSIENT
     LrPackageDownloadFlag flags = 0;
     GError *tmp_err = NULL;
     PyThreadState *state = NULL;
 
-    if (!PyArg_ParseTuple(args, "O!i:download_packages",
-                          &PyList_Type, &py_list, &failfast))
+    if (!PyArg_ParseTuple(args, "O!i|i:download_packages",
+                          &PyList_Type, &py_list, &failfast, &transient))
         return NULL;
 
     // Convert python list to GSList
@@ -61,6 +61,8 @@ py_download_packages(G_GNUC_UNUSED PyObject *self, PyObject *args)
 
     if (failfast)
         flags |= LR_PACKAGEDOWNLOAD_FAILFAST;
+    if (transient)
+        flags |= LR_PACKAGEDOWNLOAD_TRANSIENT;
 
     // XXX: GIL Hack
     int hack_rc = gil_logger_hack_begin(&state);

@@ -14,8 +14,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+ * License along with this library; if not, see <https://www.gnu.org/licenses/>.
  */
 
 #ifndef __LR_PACKAGE_DOWNLOADER_H__
@@ -261,6 +260,13 @@ typedef enum {
         only if a nonrecoverable error related to the function itself is meet
         (Errors related to individual downloads are reported via corresponding
         PackageTarget objects). */
+    LR_PACKAGEDOWNLOAD_TRANSIENT   = 1 << 1, /*!<
+        Hint that the downloaded files will be deleted soon and will not
+        be re-verified from disk later (e.g. keepcache=0). Checksums are
+        still computed and verified during download - this only skips
+        persisting the checksum to an xattr (and the
+        fsync() that would otherwise make that write crash-safe), since
+        there is no future reader for it to serve. */
 } LrPackageDownloadFlag;
 
 /** Download all LrPackageTargets at the targets GSList.

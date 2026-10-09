@@ -276,6 +276,33 @@ class TestCaseYumPackagesDownloading(TestCaseWithServer):
 
         self.assertTrue(os.path.isfile(dest))
 
+    def test_download_packages_more_parallel_than_per_mirror(self):
+        """Every target has to be downloaded even when more parallel downloads
+        are allowed than connections to a single mirror. The downloader then
+        always has a free transfer slot it cannot fill, so it has to keep
+        deferring the waiting targets until a running transfer finishes
+        instead of giving up on them."""
+        h = librepo.Handle()
+
+        url = "%s%s" % (self.MOCKURL, config.REPO_YUM_01_PATH)
+        h.urls = [url]
+        h.repotype = librepo.LR_YUMREPO
+        h.setopt(librepo.LRO_MAXPARALLELDOWNLOADS, 5)
+        h.setopt(librepo.LRO_MAXDOWNLOADSPERMIRROR, 1)
+
+        pkgs = []
+        for x in range(10):
+            dest = os.path.join(self.tmpdir, "pkg-%d.rpm" % x)
+            pkgs.append(librepo.PackageTarget(config.PACKAGE_01_01,
+                                              handle=h,
+                                              dest=dest))
+
+        librepo.download_packages(pkgs)
+
+        for pkg in pkgs:
+            self.assertTrue(pkg.err is None)
+            self.assertTrue(os.path.isfile(pkg.local_path))
+
     def test_download_packages_02_with_failfast(self):
         h = librepo.Handle()
 
@@ -810,6 +837,75 @@ class TestCaseYumPackagesDownloading(TestCaseWithServer):
         self.assertTrue(os.path.isfile(pkg.local_path))
 
         with open(pkg.local_path, 'rb') as f:
+            data = f.read()
+        sha256 = hashlib.sha256(data).hexdigest()
+        self.assertEqual(sha256, config.PACKAGE_01_01_SHA256)
+
+    def test_download_packages_resume_complete_file_no_xattr(self):
+        # Regression test for
+        # https://github.com/rpm-software-management/librepo/issues/384
+        #
+        # A complete file already exists at the destination but it no longer
+        # carries the librepo xattr - e.g. a package fully downloaded during a
+        # previous run (the xattr is removed once a download finishes).
+        # Downloading it again with resume=True but without a known checksum
+        # or expected size (as libdnf5 does for a command-line package given
+        # by URL on a repeated install) must not corrupt the file. Because no
+        # checksum/size is known, librepo cannot short-circuit as "already
+        # downloaded" and actually re-fetches over the existing file.
+        # Previously the offset was determined by seeking to the end of the
+        # file, and after the file was truncated back to zero the stream
+        # position was left at the old end, so the fresh data was written
+        # after a zero-filled hole, doubling the file size and corrupting it.
+        h = librepo.Handle()
+        h.urls = ["%s%s" % (self.MOCKURL, config.REPO_YUM_01_PATH)]
+        h.repotype = librepo.LR_YUMREPO
+
+        # First download - a normal complete download. On success librepo
+        # removes the "downloadinprogress" xattr, leaving a complete file
+        # with no librepo xattr (the state after any finished download).
+        pkgs = [librepo.PackageTarget(config.PACKAGE_01_01,
+                                      handle=h,
+                                      dest=self.tmpdir,
+                                      checksum_type=librepo.SHA256,
+                                      checksum=config.PACKAGE_01_01_SHA256)]
+        librepo.download_packages(pkgs, failfast=True)
+        first = pkgs[0]
+        self.assertTrue(first.err is None)
+        self.assertTrue(os.path.isfile(first.local_path))
+        local_path = first.local_path
+        expected_size = os.path.getsize(local_path)
+
+        # Sanity check: the xattr must be gone after a finished download,
+        # otherwise the resume branch below would not be exercised.
+        try:
+            xattr.getxattr(local_path,
+                           "user.librepo.downloadinprogress".encode("utf-8"))
+            has_xattr = True
+        except IOError as err:
+            if err.errno == errno.EOPNOTSUPP:
+                self.skipTest('extended attributes are not supported')
+            has_xattr = False
+        except OSError:
+            has_xattr = False
+        self.assertFalse(has_xattr,
+                         "xattr should be removed after a finished download")
+
+        # Second download with resume=True but WITHOUT a checksum or expected
+        # size - librepo re-fetches over the existing complete file.
+        pkgs2 = [librepo.PackageTarget(config.PACKAGE_01_01,
+                                       handle=h,
+                                       dest=self.tmpdir,
+                                       resume=True)]
+        librepo.download_packages(pkgs2, failfast=True)
+        second = pkgs2[0]
+        self.assertTrue(second.err is None)
+        self.assertTrue(os.path.isfile(second.local_path))
+
+        # File must not be corrupted: same size (not doubled) and correct
+        # checksum (not prefixed with a zero-filled hole).
+        self.assertEqual(os.path.getsize(second.local_path), expected_size)
+        with open(second.local_path, 'rb') as f:
             data = f.read()
         sha256 = hashlib.sha256(data).hexdigest()
         self.assertEqual(sha256, config.PACKAGE_01_01_SHA256)

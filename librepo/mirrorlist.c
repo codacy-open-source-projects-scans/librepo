@@ -14,8 +14,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+ * License along with this library; if not, see <https://www.gnu.org/licenses/>.
  */
 
 #define _POSIX_SOURCE
@@ -72,6 +71,7 @@ lr_mirrorlist_parse_file(LrMirrorlist *mirrorlist, int fd, GError **err)
         g_debug("%s: Cannot fdopen(mirrorlist_fd): %s", __func__, g_strerror(errno));
         g_set_error(err, LR_MIRRORLIST_ERROR, LRE_IO,
                     "fdopen(%d, \"r\") error: %s", fd_dup, g_strerror(errno));
+        close(fd_dup);
         return FALSE;
     }
 

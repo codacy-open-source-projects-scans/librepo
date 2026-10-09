@@ -14,8 +14,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+ * License along with this library; if not, see <https://www.gnu.org/licenses/>.
  */
 
 #include <glib.h>
@@ -124,7 +123,8 @@ lr_url_substitute(const char *url, LrUrlVars *list)
                 bracket = FALSE;
             }
             const char *varname = cur;
-            for (; isalnum(*cur) || (*cur == '_' && isalnum(*(cur + 1))); ++cur);
+            for (; isalnum((unsigned char) *cur) ||
+                   (*cur == '_' && isalnum((unsigned char) *(cur + 1))); ++cur);
             if (cur != varname && (!bracket || *cur == '}')) {
                 for (LrUrlVars *elem = list; elem; elem = g_slist_next(elem)) {
                     LrVar *var_val = elem->data;

@@ -14,8 +14,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+ * License along with this library; if not, see <https://www.gnu.org/licenses/>.
  */
 
 #include <glib.h>
@@ -48,6 +47,7 @@ lr_xml_parser_data_free(LrParserData *pd)
     g_free(pd->content);
     g_free(pd->swtab);
     g_free(pd->sbtab);
+    g_free(pd->cpeid);
     g_free(pd);
 }
 
@@ -67,7 +67,7 @@ lr_char_handler(void *pdata, const xmlChar *s, int len)
     l = pd->lcontent + len + 1;
     if (l > pd->acontent) {
         pd->acontent = l + CONTENT_REALLOC_STEP;
-        pd->content = realloc(pd->content, pd->acontent);
+        pd->content = g_realloc(pd->content, pd->acontent);
     }
 
     c = pd->content + pd->lcontent;
@@ -130,6 +130,7 @@ lr_xml_parser_strtoll(LrParserData *pd,
     if (!nptr)
         return 0;
 
+    errno = 0;
     val = g_ascii_strtoll(nptr, &endptr, base);
 
     if ((val == G_MAXINT64 || val == G_MININT64) && errno == ERANGE)
@@ -151,13 +152,19 @@ lr_xml_parser_generic(XmlParser *parser,
     /* Note: This function uses .err members of LrParserData! */
 
     gboolean ret = TRUE;
-    xmlParserCtxtPtr ctxt = xmlCreatePushParserCtxt(parser, pd, NULL, 0, NULL);
-    ctxt->linenumbers = 1;
+    xmlParserCtxtPtr ctxt;
 
-    assert(ctxt);
     assert(pd);
     assert(fd >= 0);
     assert(!err || *err == NULL);
+
+    ctxt = xmlCreatePushParserCtxt(parser, pd, NULL, 0, NULL);
+    if (!ctxt) {
+        g_set_error(err, LR_XML_PARSER_ERROR, LRE_MEMORY,
+                    "Cannot create an XML parser context");
+        return FALSE;
+    }
+    ctxt->linenumbers = 1;
 
     while (1) {
         int len;

@@ -14,8 +14,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+ * License along with this library; if not, see <https://www.gnu.org/licenses/>.
  */
 
 #define _XOPEN_SOURCE   500 // Because of fdopen() and ftruncate()
@@ -128,6 +127,43 @@ typedef struct {
         adjusted when mirrors respond with 200 to a range request */
 } LrMirror;
 
+/** Resources and scratch state for one in-flight transfer attempt.
+ *
+ * A target only needs these while a transfer is actually running, and at most
+ * max_parallel_connections transfers run at a time. Holding them in a separate
+ * allocation, made when a transfer starts and released when it ends, makes the
+ * cost scale with the number of concurrent connections instead of with the
+ * number of targets - which is what matters when a caller hands librepo a
+ * whole repository in one batch.
+ *
+ * Only state that nothing reads once the transfer has been torn down belongs
+ * here. The *verdict* of an attempt - curl_code, headercb_state,
+ * original_offset, cb_return_code, zck_state - is consumed by the retry logic
+ * in check_transfer_statuses() after teardown, so it stays in LrTarget.
+ */
+typedef struct {
+    CURL *curl_handle; /*!<
+        Used curl handle or NULL */
+    FILE *f; /*!<
+        fdopened file descriptor from LrDownloadTarget and used
+        in curl_handle. */
+    char errorbuffer[CURL_ERROR_SIZE]; /*!<
+        Error buffer used in curl handle. Consumed by
+        check_finished_transfer_status() before the transfer is torn down. */
+    struct curl_slist *curl_rqheaders; /*!<
+        Extra headers for request. */
+    LrProtocol protocol; /*!<
+        Current protocol */
+    gchar *headercb_interrupt_reason; /*!<
+        Reason why was the transfer interrupted */
+    gint64 writecb_recieved; /*!<
+        Total number of bytes received by the write function
+        during the current transfer. */
+    gboolean writecb_required_range_written; /*!<
+        If a byte range was specified to download and the
+        range was downloaded, it is TRUE. Otherwise FALSE. */
+} LrTransfer;
+
 typedef struct {
     LrDownloadState state; /*!<
         State of the download (transfer). */
@@ -144,15 +180,9 @@ typedef struct {
         successfully performed.
         If state is LR_DS_FAILED then mirror from which last try
         was done. */
-    LrProtocol protocol; /*!<
-        Current protocol */
-    CURL *curl_handle; /*!<
-        Used curl handle or NULL */
-    FILE *f; /*!<
-        fdopened file descriptor from LrDownloadTarget and used
-        in curl_handle. */
-    char errorbuffer[CURL_ERROR_SIZE]; /*!<
-        Error buffer used in curl handle */
+    LrTransfer *transfer; /*!<
+        Resources for the transfer currently in progress, or NULL when no
+        transfer is running for this target. See LrTransfer. */
     GSList *tried_mirrors; /*!<
         List of already tried mirrors (LrMirror *).
         This mirrors won't be tried again. */
@@ -172,19 +202,11 @@ typedef struct {
     LrHandle *handle; /*!<
         LrHandle associated with this target */
     LrHeaderCbState headercb_state; /*!<
-        State of the header callback for current transfer */
-    gchar *headercb_interrupt_reason; /*!<
-        Reason why was the transfer interrupted */
-    gint64 writecb_recieved; /*!<
-        Total number of bytes received by the write function
-        during the current transfer. */
-    gboolean writecb_required_range_written; /*!<
-        If a byte range was specified to download and the
-        range was downloaded, it is TRUE. Otherwise FALSE. */
+        State of the header callback for the last transfer.
+        Outlives the transfer: check_transfer_statuses() consults it when
+        deciding whether a retry may keep the partial data. */
     LrCbReturnCode cb_return_code; /*!<
         Last cb return code. */
-    struct curl_slist *curl_rqheaders; /*!<
-        Extra headers for request. */
 
     #ifdef WITH_ZCHUNK
     LrZckState zck_state; /*!<
@@ -204,6 +226,12 @@ typedef struct {
 
     gboolean failfast; /*!<
         Fail fast */
+
+    gboolean persist_checksum_cache; /*!<
+        Whether to persist verified checksums to xattrs
+        (and fsync() beforehand to make that write crash-safe). FALSE for
+        transient downloads (see LR_PACKAGEDOWNLOAD_TRANSIENT) that will
+        never be re-verified from disk. */
 
     int max_parallel_connections; /*!<
         Maximal number of parallel downloads. */
@@ -282,14 +310,28 @@ typedef struct {
  *       | LrDownloadState state      | | |   |  |  | char *baseurl            |
  *       | LrDownloadTarget *target  -----------/   | int fd                   |
  *       | LrMirror *mirror          --------/      | LrChecksumType checks..  |
- *       | CURL *curl_handle          |-+           | char *checksum           |
- *       | FILE *f                    |             | int resume               |
- *       | GSList *tried_mirrors      |             | LrProgressCb progresscb  |
- *       | gint64 original_offset     |             | void *cbdata             |
- *       | GSlist *lrmirrors         ---\           | GStringChunk *chunk      |
- *       +----------------------------+  |          | int rcode                |
- *                                       |          | char *err                |
- *      Points to list of LrMirrors <---/           +--------------------------+
+ *       | LrTransfer *transfer      ---\           | char *checksum           |
+ *       | LrHeaderCbState headercb.. |-+|          | int resume               |
+ *       | GSList *tried_mirrors      |  |          | LrProgressCb progresscb  |
+ *       | gint64 original_offset     |  |          | void *cbdata             |
+ *       | GSlist *lrmirrors         ---\|          | GStringChunk *chunk      |
+ *       +----------------------------+ ||          | int rcode                |
+ *                                      ||          | char *err                |
+ *      Points to list of LrMirrors <---/|          +--------------------------+
+ *                                       |
+ *                    /------------------/
+ *                   \/
+ *          +--------------------------+  NULL unless a transfer is running.
+ *          |        LrTransfer        |  Allocated when a transfer starts and
+ *          +--------------------------+  freed when it ends, so at most
+ *          | CURL *curl_handle        |  max_parallel_connections of these
+ *          | FILE *f                  |  exist at a time - not one per target.
+ *          | char errorbuffer[]       |
+ *          | curl_slist *curl_rqhea.. |
+ *          | LrProtocol protocol      |
+ *          | char *headercb_interru.. |
+ *          | gint64 writecb_recieved  |
+ *          +--------------------------+
  */
 
 static gboolean
@@ -346,6 +388,28 @@ is_parallel_connections_limited_and_reached(const LrMirror *mirror)
 {
     return mirror->allowed_parallel_connections != -1 &&
            mirror->running_transfers >= mirror->allowed_parallel_connections;
+}
+
+/** Check if every mirror in a list has reached its limit of parallel
+ * connections. Which mirrors a particular target may use depends on that
+ * target, but if none of them can take another connection at all then no
+ * target sharing the list can be started, so all of them can be skipped
+ * without being examined one by one.
+ */
+static gboolean
+all_mirrors_at_connection_limit(LrDownload *dd, GSList *lrmirrors)
+{
+    for (GSList *elem = lrmirrors; elem; elem = g_slist_next(elem)) {
+        LrMirror *mirror = elem->data;
+        // An untouched mirror has allowed_parallel_connections set to 0, which
+        // would look like a reached limit, so initialize it first - exactly as
+        // select_suitable_mirror() does before the same test.
+        init_once_allowed_parallel_connections(mirror, dd->max_connection_per_host);
+        if (!is_parallel_connections_limited_and_reached(mirror))
+            return FALSE;
+    }
+
+    return TRUE;
 }
 
 static void
@@ -462,7 +526,7 @@ size_t lr_zckheadercb(char *b, size_t l, size_t c, void *dl_v) {
     assert(target && target->target);
 
     long code = -1;
-    curl_easy_getinfo(target->curl_handle, CURLINFO_RESPONSE_CODE, &code);
+    curl_easy_getinfo(target->transfer->curl_handle, CURLINFO_RESPONSE_CODE, &code);
     if(code == 200) {
         g_debug("%s: Too many ranges were attempted in one download", __func__);
         target->range_fail = 1;
@@ -504,7 +568,7 @@ lr_headercb(void *ptr, size_t size, size_t nmemb, void *userdata)
     gint64 expected = lrtarget->target->expectedsize;
 
     if (state == LR_HCS_DEFAULT) {
-        if (lrtarget->protocol == LR_PROTOCOL_HTTP
+        if (lrtarget->transfer->protocol == LR_PROTOCOL_HTTP
             && g_str_has_prefix(header, "HTTP/")) {
             // Header of a HTTP protocol
             if ((g_strrstr(header, "200") ||
@@ -519,7 +583,7 @@ lr_headercb(void *ptr, size_t size, size_t nmemb, void *userdata)
                 // in case of redirection, 200 OK still could come
                 g_debug("%s: Non OK HTTP header status: %s", __func__, header);
             }
-        } else if (lrtarget->protocol == LR_PROTOCOL_FTP) {
+        } else if (lrtarget->transfer->protocol == LR_PROTOCOL_FTP) {
             // Headers of a FTP protocol
             if (g_str_has_prefix(header, "213 ")) {
                 // Code 213 should keep the file size
@@ -536,7 +600,7 @@ lr_headercb(void *ptr, size_t size, size_t nmemb, void *userdata)
                             " != %"G_GINT64_FORMAT")",
                             __func__, content_length, expected);
                     lrtarget->headercb_state = LR_HCS_INTERRUPTED;
-                    lrtarget->headercb_interrupt_reason = g_strdup_printf(
+                    lrtarget->transfer->headercb_interrupt_reason = g_strdup_printf(
                         "Inconsistent FTP server data, file Content-Length: %"G_GINT64_FORMAT " reported"
                         " via 213 code, repository metadata states file length: %"G_GINT64_FORMAT
                         " (please report to repository maintainer)",
@@ -553,9 +617,11 @@ lr_headercb(void *ptr, size_t size, size_t nmemb, void *userdata)
     }
 
     if (state == LR_HCS_HTTP_STATE_OK) {
-        if (g_str_has_prefix(header, "Content-Length: ")) {
+        // Header field names are case-insensitive (RFC 9110), e.g. HTTP/2
+        // servers always send them in lower case.
+        if (!g_ascii_strncasecmp(header, "Content-Length:", STRLEN("Content-Length:"))) {
             // Content-Length header found
-            char *content_length_str = header + STRLEN("Content-Length: ");
+            char *content_length_str = g_strchug(header + STRLEN("Content-Length:"));
             gint64 content_length = g_ascii_strtoll(content_length_str,
                                                     NULL, 0);
             g_debug("%s: Server returned Content-Length: \"%s\" "
@@ -575,7 +641,7 @@ lr_headercb(void *ptr, size_t size, size_t nmemb, void *userdata)
                         " != %"G_GINT64_FORMAT")",
                         __func__, content_length, remaining_bytes);
                 lrtarget->headercb_state = LR_HCS_INTERRUPTED;
-                lrtarget->headercb_interrupt_reason = g_strdup_printf(
+                lrtarget->transfer->headercb_interrupt_reason = g_strdup_printf(
                     "Inconsistent server data, reported file Content-Length: %"G_GINT64_FORMAT
                     ", repository metadata states file length: %"G_GINT64_FORMAT
                     " (please report to repository maintainer)",
@@ -628,18 +694,18 @@ lr_writecb(char *ptr, size_t size, size_t nmemb, void *userdata)
 
     if (range_start <= 0 && range_end <= 0) {
         // Write everything curl give to you
-        target->writecb_recieved += all;
-        return fwrite(ptr, size, nmemb, target->f);
+        target->transfer->writecb_recieved += all;
+        return fwrite(ptr, size, nmemb, target->transfer->f);
     }
 
     /* Deal with situation when user wants only specific byte range of the
      * target file, and write only the range.
      */
 
-    gint64 cur_range_start = target->writecb_recieved;
+    gint64 cur_range_start = target->transfer->writecb_recieved;
     gint64 cur_range_end = cur_range_start + all;
 
-    target->writecb_recieved += all;
+    target->transfer->writecb_recieved += all;
 
     if (target->target->byterangestart > 0) {
         // If byterangestart is specified, then CURLOPT_RESUME_FROM_LARGE
@@ -659,7 +725,7 @@ lr_writecb(char *ptr, size_t size, size_t nmemb, void *userdata)
         // The wanted byte range is over
         // Return zero that will lead to transfer abortion
         // with error code CURLE_WRITE_ERROR
-        target->writecb_required_range_written = TRUE;
+        target->transfer->writecb_required_range_written = TRUE;
         return 0;
     }
 
@@ -694,7 +760,7 @@ lr_writecb(char *ptr, size_t size, size_t nmemb, void *userdata)
     }
 
     assert(nmemb > 0);
-    cur_written = fwrite(ptr, size, nmemb, target->f);
+    cur_written = fwrite(ptr, size, nmemb, target->transfer->f);
     if (cur_written != nmemb) {
         g_warning("Error while writing file: %s", g_strerror(errno));
         return 0; // There was an error
@@ -865,6 +931,15 @@ select_next_target(LrDownload *dd,
     *selected_target = NULL;
     *selected_full_url = NULL;
 
+    // Verdict of all_mirrors_at_connection_limit() for the mirror list of the
+    // previously examined target. Targets that share a handle share one mirror
+    // list, so remembering the last answer answers it for the whole run of
+    // them, and a scan that cannot start anything - which is every scan once
+    // all the mirrors are busy - stays cheap no matter how many targets are
+    // waiting.
+    GSList *checked_lrmirrors = NULL;
+    gboolean checked_lrmirrors_are_full = FALSE;
+
     for (GSList *elem = dd->targets; elem; elem = g_slist_next(elem)) {
         LrTarget *target = elem->data;
         LrMirror *mirror = NULL;
@@ -890,6 +965,21 @@ select_next_target(LrDownload *dd,
             g_set_error(err, LR_DOWNLOADER_ERROR, LRE_NOURL,
                         "Empty mirrorlist and no basepath specified!");
             return FALSE;
+        }
+
+        // Skip the target if it has to go through a mirror and none of its
+        // mirrors can take another connection. Only targets that use mirrors
+        // qualify - a complete URL in the path or a base URL bypasses them.
+        if (!complete_url_in_path && !target->target->baseurl
+            && target->lrmirrors)
+        {
+            if (target->lrmirrors != checked_lrmirrors) {
+                checked_lrmirrors = target->lrmirrors;
+                checked_lrmirrors_are_full =
+                    all_mirrors_at_connection_limit(dd, target->lrmirrors);
+            }
+            if (checked_lrmirrors_are_full)
+                continue;
         }
 
         g_debug("Selecting mirror for: %s", target->target->path);
@@ -1045,9 +1135,9 @@ remove_librepo_xattr(LrDownloadTarget * target)
 gboolean
 lr_zck_clear_header(LrTarget *target, GError **err)
 {
-    assert(target && target->f && target->target && target->target->path);
+    assert(target && target->transfer->f && target->target && target->target->path);
 
-    int fd = fileno(target->f);
+    int fd = fileno(target->transfer->f);
     lseek(fd, 0, SEEK_END);
     if(ftruncate(fd, 0) < 0) {
         g_set_error(err, LR_DOWNLOADER_ERROR, LRE_IO,
@@ -1063,7 +1153,7 @@ find_local_zck_header(LrTarget *target, GError **err)
 {
     zckCtx *zck = NULL;
     gboolean found = FALSE;
-    int fd = fileno(target->f);
+    int fd = fileno(target->transfer->f);
 
     if(target->target->handle->cachedir) {
         g_debug("%s: Cache directory: %s\n", __func__,
@@ -1103,7 +1193,8 @@ find_local_zck_header(LrTarget *target, GError **err)
                    ftruncate(fd, lseek(chk_fd, 0, SEEK_END)) >= 0 &&
                    lseek(fd, 0, SEEK_SET) == 0 &&
                    (zck = lr_zck_init_read(target->target, (char *)file->data,
-                                           chk_fd, &tmp_err))) {
+                                           fd, &tmp_err))) {
+                    close(chk_fd);
                     found = TRUE;
                     break;
                 } else {
@@ -1141,7 +1232,7 @@ static gboolean
 prep_zck_header(LrTarget *target, GError **err)
 {
     zckCtx *zck = NULL;
-    int fd = fileno(target->f);
+    int fd = fileno(target->transfer->f);
     GError *tmp_err = NULL;
 
     if(lr_zck_valid_header(target->target, target->target->path, fd,
@@ -1172,6 +1263,7 @@ prep_zck_header(LrTarget *target, GError **err)
         g_set_error(err, LR_DOWNLOADER_ERROR, LRE_ZCK,
                     "Unable to initialize zchunk file %s for reading",
                     target->target->path);
+        zck_free(&zck);
         return FALSE;
     }
 
@@ -1201,7 +1293,7 @@ find_local_zck_chunks(LrTarget *target, GError **err)
     assert(target && target->target && target->target->zck_dl);
 
     zckCtx *zck = zck_dl_get_zck(target->target->zck_dl);
-    int fd = fileno(target->f);
+    int fd = fileno(target->transfer->f);
     if(zck && fd != zck_get_fd(zck) && !zck_set_fd(zck, fd)) {
         g_set_error(err, LR_DOWNLOADER_ERROR, LRE_ZCK,
                     "Unable to set zchunk file descriptor for %s: %s",
@@ -1270,7 +1362,7 @@ static gboolean
 prep_zck_body(LrTarget *target, GError **err)
 {
     zckCtx *zck = zck_dl_get_zck(target->target->zck_dl);
-    int fd = fileno(target->f);
+    int fd = fileno(target->transfer->f);
     if(zck && fd != zck_get_fd(zck) && !zck_set_fd(zck, fd)) {
         g_set_error(err, LR_DOWNLOADER_ERROR, LRE_ZCK,
                     "Unable to set zchunk file descriptor for %s: %s",
@@ -1310,7 +1402,7 @@ static gboolean
 check_zck(LrTarget *target, GError **err)
 {
     assert(!err || *err == NULL);
-    assert(target && target->f && target->target);
+    assert(target && target->transfer->f && target->target);
 
     if(target->mirror->max_ranges == 0 || target->mirror->mirror->protocol != LR_PROTOCOL_HTTP) {
         target->zck_state = LR_ZCK_DL_BODY;
@@ -1400,6 +1492,52 @@ check_zck(LrTarget *target, GError **err)
 }
 #endif /* WITH_ZCHUNK */
 
+/** Give a target the state it needs to run a transfer, zero-initialised.
+ */
+static void
+transfer_begin(LrTarget *target)
+{
+    assert(target);
+    assert(!target->transfer);
+
+    target->transfer = lr_malloc0(sizeof(*target->transfer));
+}
+
+/** Tear down a target's transfer and release its resources: the curl handle,
+ * the open file, the request headers and the header callback message.
+ * Does nothing if no transfer is in progress, so it is safe on error paths
+ * that may not have got as far as starting one.
+ *
+ * Note: a caller that has already handed the easy handle to the multi handle
+ * must curl_multi_remove_handle() it before calling this.
+ *
+ * Anything still needed after this point must have been copied out of the
+ * LrTransfer first - see check_transfer_statuses(), which turns the error
+ * buffer into a GError before tearing the transfer down.
+ */
+static void
+transfer_end(LrTarget *target)
+{
+    LrTransfer *transfer;
+
+    assert(target);
+
+    transfer = target->transfer;
+    if (!transfer)
+        return;
+
+    if (transfer->curl_handle)
+        curl_easy_cleanup(transfer->curl_handle);
+    if (transfer->f)
+        fclose(transfer->f);
+    if (transfer->curl_rqheaders)
+        curl_slist_free_all(transfer->curl_rqheaders);
+    g_free(transfer->headercb_interrupt_reason);
+
+    target->transfer = NULL;
+    lr_free(transfer);
+}
+
 /** Open the file to write to
  */
 static FILE*
@@ -1487,6 +1625,10 @@ prepare_next_transfer(LrDownload *dd, gboolean *candidatefound, GError **err)
 
     protocol = lr_detect_protocol(full_url);
 
+    // Allocate the transfer state. Every exit from here on, including the
+    // fail: label, goes through transfer_end().
+    transfer_begin(target);
+
     // Prepare CURL easy handle
     CURLcode c_rc;
     CURL *h;
@@ -1500,7 +1642,7 @@ prepare_next_transfer(LrDownload *dd, gboolean *candidatefound, GError **err)
                     "curl_easy_duphandle() call failed");
         goto fail;
     }
-    target->curl_handle = h;
+    target->transfer->curl_handle = h;
 
     // Set URL
     c_rc = curl_easy_setopt(h, CURLOPT_URL, full_url);
@@ -1512,21 +1654,21 @@ prepare_next_transfer(LrDownload *dd, gboolean *candidatefound, GError **err)
     }
 
     // Set error buffer
-    target->errorbuffer[0] = '\0';
-    c_rc = curl_easy_setopt(h, CURLOPT_ERRORBUFFER, target->errorbuffer);
+    target->transfer->errorbuffer[0] = '\0';
+    c_rc = curl_easy_setopt(h, CURLOPT_ERRORBUFFER, target->transfer->errorbuffer);
     if (c_rc != CURLE_OK) {
         g_set_error(err, LR_DOWNLOADER_ERROR, LRE_CURL,
-                    "curl_easy_setopt(h, CURLOPT_ERRORBUFFER, target->errorbuffer) failed: %s",
+                    "curl_easy_setopt(h, CURLOPT_ERRORBUFFER, target->transfer->errorbuffer) failed: %s",
                     curl_easy_strerror(c_rc));
         goto fail;
     }
 
     // Prepare FILE
-    target->f = open_target_file(target, err);
-    if (!target->f)
+    target->transfer->f = open_target_file(target, err);
+    if (!target->transfer->f)
         goto fail;
-    target->writecb_recieved = 0;
-    target->writecb_required_range_written = FALSE;
+    target->transfer->writecb_recieved = 0;
+    target->transfer->writecb_required_range_written = FALSE;
 
     #ifdef WITH_ZCHUNK
     // If file is zchunk, prep it
@@ -1556,19 +1698,16 @@ prepare_next_transfer(LrDownload *dd, gboolean *candidatefound, GError **err)
                     goto fail;
                 }
             }
-            curl_easy_cleanup(target->curl_handle);
-            target->curl_handle = NULL;
-            g_free(target->headercb_interrupt_reason);
-            target->headercb_interrupt_reason = NULL;
-            fclose(target->f);
-            target->f = NULL;
+            // Released before recursing, so that a run of already-complete
+            // zchunk targets does not hold one transfer per level
+            transfer_end(target);
             lr_downloadtarget_set_error(target->target, LRE_OK, NULL);
             return prepare_next_transfer(dd, candidatefound, err);
         }
     }
     # endif /* WITH_ZCHUNK */
 
-    int fd = fileno(target->f);
+    int fd = fileno(target->transfer->f);
 
     if (target->resume && target->resume_count >= LR_DOWNLOADER_MAXIMAL_RESUME_COUNT) {
         target->resume = FALSE;
@@ -1580,8 +1719,8 @@ prepare_next_transfer(LrDownload *dd, gboolean *candidatefound, GError **err)
     if (target->resume) {
         if (target->original_offset == -1) {
             // Determine offset
-            fseek(target->f, 0L, SEEK_END);
-            gint64 determined_offset = ftell(target->f);
+            fseek(target->transfer->f, 0L, SEEK_END);
+            gint64 determined_offset = ftell(target->transfer->f);
             if (determined_offset == -1) {
                 // An error while determining offset =>
                 // Download the whole file again
@@ -1591,7 +1730,7 @@ prepare_next_transfer(LrDownload *dd, gboolean *candidatefound, GError **err)
         } else if (target->original_offset > 0) {
             // Seek the file to the resume offset so that received
             // data is written at the correct position.
-            fseek(target->f, target->original_offset, SEEK_SET);
+            fseek(target->transfer->f, target->original_offset, SEEK_SET);
         }
 
         // Starting from offset 0 is a fresh download, not a resume.
@@ -1612,6 +1751,12 @@ prepare_next_transfer(LrDownload *dd, gboolean *candidatefound, GError **err)
                             "ftruncate() failed: %s", g_strerror(errno));
                 goto fail;
             }
+            // The stream position was moved to the end of the file while
+            // determining the offset above. After truncating the file back
+            // to zero, rewind the stream so the freshly downloaded data is
+            // written from the beginning instead of leaving a zero-filled
+            // hole (which would corrupt and double the size of the file).
+            fseek(target->transfer->f, 0L, SEEK_SET);
             target->original_offset = 0;
         } else {
             gint64 used_offset = target->original_offset;
@@ -1687,7 +1832,7 @@ prepare_next_transfer(LrDownload *dd, gboolean *candidatefound, GError **err)
         if (!headers)
             lr_out_of_memory();
     }
-    target->curl_rqheaders = headers;
+    target->transfer->curl_rqheaders = headers;
     c_rc = curl_easy_setopt(h, CURLOPT_HTTPHEADER, headers);
     assert(c_rc == CURLE_OK);
 
@@ -1705,11 +1850,11 @@ prepare_next_transfer(LrDownload *dd, gboolean *candidatefound, GError **err)
 
     // Set the state of header callback for this transfer
     target->headercb_state = LR_HCS_DEFAULT;
-    g_free(target->headercb_interrupt_reason);
-    target->headercb_interrupt_reason = NULL;
+    g_free(target->transfer->headercb_interrupt_reason);
+    target->transfer->headercb_interrupt_reason = NULL;
 
     // Set protocol of the target
-    target->protocol = protocol;
+    target->transfer->protocol = protocol;
 
     // Add the transfer to the list of running transfers
     dd->running_transfers = g_slist_append(dd->running_transfers, target);
@@ -1717,15 +1862,10 @@ prepare_next_transfer(LrDownload *dd, gboolean *candidatefound, GError **err)
     return TRUE;
 
 fail:
-    // Cleanup target
-    if (target->curl_handle) {
-        curl_easy_cleanup(target->curl_handle);
-        target->curl_handle = NULL;
-    }
-    if (target->f != NULL) {
-        fclose(target->f);
-        target->f = NULL;
-    }
+    // Cleanup target. The easy handle was never handed to the multi handle -
+    // every goto fail above precedes curl_multi_add_handle() - so there is
+    // nothing to remove from it here.
+    transfer_end(target);
 
     return FALSE;
 }
@@ -1771,7 +1911,7 @@ set_max_speeds_to_transfers(LrDownload *dd, GError **err)
         for (GSList *elem = dd->running_transfers; elem; elem = g_slist_next(elem)) {
             LrTarget *ltarget = elem->data;
             if (ltarget->handle == repo) {
-                CURL *curl_handle = ltarget->curl_handle;
+                CURL *curl_handle = ltarget->transfer->curl_handle;
                 CURLcode code = curl_easy_setopt(curl_handle,
                                                  CURLOPT_MAX_RECV_SPEED_LARGE,
                                                  (curl_off_t)single_target_speed);
@@ -1856,7 +1996,7 @@ check_finished_transfer_status(CURLMsg *msg,
         // There was an error that is reported by CURLcode
 
         if (msg->data.result == CURLE_WRITE_ERROR &&
-            target->writecb_required_range_written)
+            target->transfer->writecb_required_range_written)
         {
             // Download was interrupted by writecb because
             // user want only specified byte range of the
@@ -1871,7 +2011,7 @@ check_finished_transfer_status(CURLMsg *msg,
             // Download was interrupted by header callback
             g_set_error(transfer_err, LR_DOWNLOADER_ERROR, LRE_CURL,
                         "Interrupted by header callback: %s",
-                        target->headercb_interrupt_reason);
+                        target->transfer->headercb_interrupt_reason);
         }
         #ifdef WITH_ZCHUNK
         else if (target->range_fail) {
@@ -1911,7 +2051,7 @@ check_finished_transfer_status(CURLMsg *msg,
                         msg->data.result,
                         curl_easy_strerror(msg->data.result),
                         effective_url,
-                        target->errorbuffer);
+                        target->transfer->errorbuffer);
 
             switch (msg->data.result) {
             case CURLE_ABORTED_BY_CALLBACK:
@@ -1934,7 +2074,7 @@ check_finished_transfer_status(CURLMsg *msg,
                        msg->data.result,
                        curl_easy_strerror(msg->data.result),
                        effective_url,
-                       target->errorbuffer);
+                       target->transfer->errorbuffer);
                 *fatal_error = TRUE;
                 break;
             case CURLE_OPERATION_TIMEDOUT:
@@ -1943,7 +2083,7 @@ check_finished_transfer_status(CURLMsg *msg,
                        msg->data.result,
                        curl_easy_strerror(msg->data.result),
                        effective_url,
-                       target->errorbuffer);
+                       target->transfer->errorbuffer);
                 *serious_error = TRUE;
                 break;
             default:
@@ -2022,6 +2162,7 @@ list_of_checksums_to_str(GSList *checksums)
 static gboolean
 check_finished_transfer_checksum(int fd,
                                  GSList *checksums,
+                                 gboolean persist_checksum_cache,
                                  gboolean *checksum_matches,
                                  GError **transfer_err,
                                  GError **err)
@@ -2042,7 +2183,7 @@ check_finished_transfer_checksum(int fd,
         ret = lr_checksum_fd_compare(chksum->type,
                                      fd,
                                      chksum->value,
-                                     1,
+                                     persist_checksum_cache,
                                      &matches,
                                      &calculated,
                                      err);
@@ -2244,6 +2385,7 @@ check_transfer_statuses(LrDownload *dd, GError **err)
 
     int msgs_in_queue;
     CURLMsg *msg;
+    gboolean transfer_finished = FALSE;
 
     while ((msg = curl_multi_info_read(dd->multi_handle, &msgs_in_queue))) {
         LrTarget *target = NULL;
@@ -2262,10 +2404,12 @@ check_transfer_statuses(LrDownload *dd, GError **err)
             continue;
         }
 
+        transfer_finished = TRUE;
+
         // Find the target with this curl easy handle
         for (GSList *elem = dd->running_transfers; elem; elem = g_slist_next(elem)) {
             LrTarget *ltarget = elem->data;
-            if (ltarget->curl_handle == msg->easy_handle)
+            if (ltarget->transfer->curl_handle == msg->easy_handle)
                 target = ltarget;
         }
 
@@ -2297,14 +2441,14 @@ check_transfer_statuses(LrDownload *dd, GError **err)
         //
         // Checksum checking
         //
-        fflush(target->f);
-        fd = fileno(target->f);
+        fflush(target->transfer->f);
+        fd = fileno(target->transfer->f);
 
         // Preserve timestamp of downloaded file if requested
         if (target->target->handle && target->target->handle->preservetime) {
             CURLcode c_rc;
             long remote_filetime = -1;
-            c_rc = curl_easy_getinfo(target->curl_handle, CURLINFO_FILETIME, &remote_filetime);
+            c_rc = curl_easy_getinfo(target->transfer->curl_handle, CURLINFO_FILETIME, &remote_filetime);
             if (c_rc == CURLE_OK && remote_filetime >= 0) {
                 const struct timeval tv[] = {{remote_filetime, 0}, {remote_filetime, 0}};
                 if (futimes(fd, tv) == -1)
@@ -2359,6 +2503,7 @@ check_transfer_statuses(LrDownload *dd, GError **err)
 
             ret = check_finished_transfer_checksum(fd,
                                                   target->target->checksums,
+                                                  dd->persist_checksum_cache,
                                                   &matches,
                                                   &transfer_err,
                                                   &tmp_err);
@@ -2383,17 +2528,12 @@ transfer_error:
         //
         // Cleanup
         //
-        curl_multi_remove_handle(dd->multi_handle, target->curl_handle);
-        curl_easy_cleanup(target->curl_handle);
-        target->curl_handle = NULL;
-        g_free(target->headercb_interrupt_reason);
-        target->headercb_interrupt_reason = NULL;
-        fclose(target->f);
-        target->f = NULL;
-        if (target->curl_rqheaders) {
-            curl_slist_free_all(target->curl_rqheaders);
-            target->curl_rqheaders = NULL;
-        }
+        // check_finished_transfer_status() above has already turned the error
+        // buffer into transfer_err, and the retry logic below reads only
+        // fields that live on the target, so the transfer state can be
+        // released here.
+        curl_multi_remove_handle(dd->multi_handle, target->transfer->curl_handle);
+        transfer_end(target);
 
         dd->running_transfers = g_slist_remove(dd->running_transfers,
                                                (gconstpointer) target);
@@ -2598,6 +2738,15 @@ transfer_error:
         }
     }
 
+    if (!transfer_finished) {
+        // Nothing finished, so no transfer slot and no mirror connection was
+        // freed and no target changed state. Nothing can be started that
+        // could not have been started by the previous call, and this function
+        // runs after every curl_multi_perform(), so asking again would only
+        // repeat a fruitless walk over every waiting target.
+        return TRUE;
+    }
+
     // At this point, after handles of finished transfers were removed
     // from the multi_handle, we could add new waiting transfers.
     return prepare_next_transfers(dd, err);
@@ -2699,9 +2848,10 @@ lr_perform(LrDownload *dd, GError **err)
 }
 
 gboolean
-lr_download(GSList *targets,
-            gboolean failfast,
-            GError **err)
+lr_download_internal(GSList *targets,
+                     gboolean failfast,
+                     gboolean persist_checksum_cache,
+                     GError **err)
 {
     gboolean ret = FALSE;
     LrDownload dd;             // dd stands for Download Data
@@ -2726,6 +2876,7 @@ lr_download(GSList *targets,
 
     // Prepare download data
     dd.failfast = failfast;
+    dd.persist_checksum_cache = persist_checksum_cache;
 
     if (lr_handle) {
         dd.max_parallel_connections = lr_handle->maxparalleldownloads;
@@ -2760,7 +2911,7 @@ lr_download(GSList *targets,
         // Assertions
         assert(dtarget);
         assert(dtarget->path);
-        assert((dtarget->fd > 0 && !dtarget->fn) || (dtarget->fd < 0 && dtarget->fn));
+        assert((dtarget->fd >= 0 && !dtarget->fn) || (dtarget->fd < 0 && dtarget->fn));
         g_debug("%s: Target: %s (%s)", __func__,
                 dtarget->path,
                 (dtarget->baseurl) ? dtarget->baseurl : "-");
@@ -2805,13 +2956,8 @@ lr_download_cleanup:
         for (GSList *elem = dd.running_transfers; elem; elem = g_slist_next(elem)){
             LrTarget *target = elem->data;
 
-            curl_multi_remove_handle(dd.multi_handle, target->curl_handle);
-            curl_easy_cleanup(target->curl_handle);
-            target->curl_handle = NULL;
-            fclose(target->f);
-            target->f = NULL;
-            g_free(target->headercb_interrupt_reason);
-            target->headercb_interrupt_reason = NULL;
+            curl_multi_remove_handle(dd.multi_handle, target->transfer->curl_handle);
+            transfer_end(target);
 
             // Call end callback
             LrEndCb end_cb =  target->target->endcb;
@@ -2854,8 +3000,8 @@ lr_download_cleanup:
     // Clean up targets
     for (GSList *elem = dd.targets; elem; elem = g_slist_next(elem)) {
         LrTarget *target = elem->data;
-        assert(target->curl_handle == NULL);
-        assert(target->f == NULL);
+        // Every transfer has been ended by now, so nothing is left allocated
+        assert(target->transfer == NULL);
 
         // Remove file created for the target if download was
         // unsuccessful and the file doesn't exists before or
@@ -2879,6 +3025,14 @@ lr_download_cleanup:
     g_slist_free(dd.targets);
 
     return ret;
+}
+
+gboolean
+lr_download(GSList *targets,
+            gboolean failfast,
+            GError **err)
+{
+    return lr_download_internal(targets, failfast, TRUE, err);
 }
 
 gboolean

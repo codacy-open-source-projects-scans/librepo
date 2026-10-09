@@ -14,8 +14,7 @@
 # Lesser General Public License for more details.
 #
 # You should have received a copy of the GNU Lesser General Public
-# License along with this library; if not, write to the Free Software
-# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+# License along with this library; if not, see <https://www.gnu.org/licenses/>.
 #
 
 """
@@ -1688,7 +1687,7 @@ def download_metadata(list):
     """
     return _librepo.download_metadata(list)
 
-def download_packages(list, failfast=False):
+def download_packages(list, failfast=False, transient=False):
     """
     Download list of packages. *list* is a list of
     :class:`~librepo.PackageTarget` objects.
@@ -1705,9 +1704,13 @@ def download_packages(list, failfast=False):
     :param failfast: If *True*, stop whole downloading immediately when any
                      of downloads fails. If *False*, ignore failed download(s)
                      and continue with other downloads.
+    :param transient: If *True*, verified checksums are not persisted to
+                     extended file attributes (LR_PACKAGEDOWNLOAD_TRANSIENT).
+                     For downloads that will be deleted and never
+                     re-verified from disk.
     :returns: *None*
     """
-    return _librepo.download_packages(list, failfast)
+    return _librepo.download_packages(list, failfast, transient)
 
 def download_url(url, fd, handle=None):
     """

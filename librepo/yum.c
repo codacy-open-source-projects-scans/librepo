@@ -14,8 +14,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+ * License along with this library; if not, see <https://www.gnu.org/licenses/>.
  */
 
 #define _POSIX_SOURCE
@@ -669,22 +668,9 @@ gboolean
 prepare_repo_download_std_target(LrHandle *handle,
                                  LrYumRepoMdRecord *record,
                                  char **path,
-                                 int *fd,
-                                 GSList **checksums,
-                                 GSList **targets,
-                                 GError **err)
+                                 GSList **checksums)
 {
     *path = lr_pathconcat(handle->destdir, record->location_href, NULL);
-    *fd = open(*path, O_CREAT|O_TRUNC|O_RDWR, 0666);
-    if (*fd < 0) {
-        g_debug("%s: Cannot create/open %s (%s)",
-                __func__, *path, g_strerror(errno));
-        g_set_error(err, LR_YUM_ERROR, LRE_IO,
-                    "Cannot create/open %s: %s", *path, g_strerror(errno));
-        g_free(*path);
-        g_slist_free_full(*targets, (GDestroyNotify) lr_downloadtarget_free);
-        return FALSE;
-    }
 
     if (handle->checks & LR_CHECK_CHECKSUM) {
         // Select proper checksum type only if checksum check is enabled
@@ -702,22 +688,9 @@ gboolean
 prepare_repo_download_zck_target(LrHandle *handle,
                                  LrYumRepoMdRecord *record,
                                  char **path,
-                                 int *fd,
-                                 GSList **checksums,
-                                 GSList **targets,
-                                 GError **err)
+                                 GSList **checksums)
 {
     *path = lr_pathconcat(handle->destdir, record->location_href, NULL);
-    *fd = open(*path, O_CREAT|O_RDWR, 0666);
-    if (*fd < 0) {
-        g_debug("%s: Cannot create/open %s (%s)",
-                __func__, *path, g_strerror(errno));
-        g_set_error(err, LR_YUM_ERROR, LRE_IO,
-                    "Cannot create/open %s: %s", *path, g_strerror(errno));
-        g_free(*path);
-        g_slist_free_full(*targets, (GDestroyNotify) lr_downloadtarget_free);
-        return FALSE;
-    }
 
     if (handle->checks & LR_CHECK_CHECKSUM) {
         // Select proper checksum type only if checksum check is enabled
@@ -756,7 +729,6 @@ prepare_repo_download_targets(LrHandle *handle,
     }
 
     for (GSList *elem = repomd->records; elem; elem = g_slist_next(elem)) {
-        int fd;
         char *path;
         LrDownloadTarget *target;
         LrYumRepoMdRecord *record = elem->data;
@@ -800,13 +772,13 @@ prepare_repo_download_targets(LrHandle *handle,
         GSList *checksums = NULL;
         if (is_zchunk) {
             #ifdef WITH_ZCHUNK
-            if(!prepare_repo_download_zck_target(handle, record, &path, &fd,
-                                                 &checksums, targets, err))
+            if(!prepare_repo_download_zck_target(handle, record, &path,
+                                                 &checksums))
                 return FALSE;
             #endif /* WITH_ZCHUNK */
         } else {
-            if(!prepare_repo_download_std_target(handle, record, &path, &fd,
-                                                 &checksums, targets, err))
+            if(!prepare_repo_download_std_target(handle, record, &path,
+                                                 &checksums))
                 return FALSE;
         }
 
@@ -822,8 +794,8 @@ prepare_repo_download_targets(LrHandle *handle,
         target = lr_downloadtarget_new(handle,
                                        location_href,
                                        record->location_base,
-                                       fd,
-                                       NULL,
+                                       -1,
+                                       path,
                                        checksums,
                                        0,
                                        0,
@@ -1465,7 +1437,7 @@ lr_yum_download_remote(LrHandle *handle, LrResult *result, GError **err)
         else
             repo->url = g_strdup(handle->urls[0]);
 
-        g_debug("%s: Repomd revision: %s", repomd->revision, __func__);
+        g_debug("%s: Repomd revision: %s", __func__, repomd->revision);
     }
 
     /* Download rest of metadata files */

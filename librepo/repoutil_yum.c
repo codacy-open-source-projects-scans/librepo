@@ -14,8 +14,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+ * License along with this library; if not, see <https://www.gnu.org/licenses/>.
  */
 
 #define _XOPEN_SOURCE 600
@@ -96,7 +95,7 @@ lr_repoutil_yum_parse_repomd(const char *in_path,
         return FALSE;
     }
 
-    if (st.st_mode & S_IFDIR)
+    if (S_ISDIR(st.st_mode))
         path = lr_pathconcat(in_path, "repodata/repomd.xml", NULL);
     else
         path = g_strdup(in_path);
